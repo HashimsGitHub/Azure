@@ -12,21 +12,96 @@ from openpyxl.utils import get_column_letter
 
 # --- Region formatter ---
 def format_location(loc: str) -> str:
+    """Convert Azure location code into a human-friendly region name."""
     if not loc:
         return ""
     loc_lower = loc.lower()
     region_map = {
-        "australiaeast": "Australia East", "australiasoutheast": "Australia Southeast",
-        "eastus": "East US", "eastus2": "East US 2", "westeurope": "West Europe",
-        "northeurope": "North Europe", "uksouth": "UK South", "ukwest": "UK West",
-        "southeastasia": "Southeast Asia", "centralus": "Central US", "southcentralus": "South Central US",
-        "westus": "West US", "westus2": "West US 2", "canadacentral": "Canada Central",
-        "canadaeast": "Canada East", "brazilsouth": "Brazil South", "japaneast": "Japan East",
-        "japanwest": "Japan West", "francecentral": "France Central", "germanywestcentral": "Germany West Central"
+        # --- Australia / APAC ---
+        "australiaeast": "Australia East",
+        "australiasoutheast": "Australia Southeast",
+        "australiacentral": "Australia Central",
+        "australiacentral2": "Australia Central 2",
+        "southeastasia": "Southeast Asia",
+        "eastasia": "East Asia",
+        "japaneast": "Japan East",
+        "japanwest": "Japan West",
+        "koreacentral": "Korea Central",
+        "koreasouth": "Korea South",
+        "southindia": "South India",
+        "centralindia": "Central India",
+        "westindia": "West India",
+
+        # --- China (21Vianet) ---
+        "chinanorth": "China North",
+        "chinanorth2": "China North 2",
+        "chinaeast": "China East",
+        "chinaeast2": "China East 2",
+
+        # --- Europe ---
+        "northeurope": "North Europe",
+        "westeurope": "West Europe",
+        "francecentral": "France Central",
+        "francesouth": "France South",
+        "germanynorth": "Germany North",
+        "germanywestcentral": "Germany West Central",
+        "norwayeast": "Norway East",
+        "norwaywest": "Norway West",
+        "swedencentral": "Sweden Central",
+        "swedensouth": "Sweden South",
+        "switzerlandnorth": "Switzerland North",
+        "switzerlandwest": "Switzerland West",
+        "polandcentral": "Poland Central",
+        "italynorth": "Italy North",
+        "spaincentral": "Spain Central",
+        "ukwest": "UK West",
+        "uksouth": "UK South",
+
+        # --- Americas ---
+        "eastus": "East US",
+        "eastus2": "East US 2",
+        "westus": "West US",
+        "westus2": "West US 2",
+        "westus3": "West US 3",
+        "centralus": "Central US",
+        "northcentralus": "North Central US",
+        "southcentralus": "South Central US",
+        "westcentralus": "West Central US",
+        "canadacentral": "Canada Central",
+        "canadaeast": "Canada East",
+        "brazilsouth": "Brazil South",
+        "brazilsoutheast": "Brazil Southeast",
+        "mexicocentral": "Mexico Central",
+        "chilecentral": "Chile Central",
+
+        # --- Middle East / Africa ---
+        "uaecentral": "UAE Central",
+        "uaenorth": "UAE North",
+        "qatarcentral": "Qatar Central",
+        "southafricanorth": "South Africa North",
+        "southafricawest": "South Africa West",
+        "israelcentral": "Israel Central",
+
+        # --- US Government / DoD ---
+        "usgovvirginia": "US Gov Virginia",
+        "usgovarizona": "US Gov Arizona",
+        "usgoviowa": "US Gov Iowa",
+        "usgovtexas": "US Gov Texas",
+        "usdodeast": "US DoD East",
+        "usdodcentral": "US DoD Central",
+
+        # --- Special / Edge ---
+        "global": "Global",
+        "centraluseuap": "Central US EUAP",
+        "eastus2euap": "East US 2 EUAP"
     }
+
     if loc_lower in region_map:
         return region_map[loc_lower]
-    return re.sub(r"([a-z])([A-Z0-9])", r"\1 \2", loc_lower.title()).replace("-", " ").title()
+    # fallback for unknown regions
+    loc_cleaned = re.sub(r'([a-z])([A-Z0-9])', r'\1 \2', loc_lower.title())
+    loc_cleaned = loc_cleaned.replace("Azure ", "").replace("-", " ").title()
+    return loc_cleaned
 
 # --- File dialogs ---
 Tk().withdraw()
