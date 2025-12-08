@@ -9,6 +9,8 @@ curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
 pip install azure-identity agent-framework
 pip install python-dotenv
 pip install openai
+
+rm -rf ai-agents 
 git clone https://github.com/MicrosoftLearning/mslearn-ai-agents ai-agents
 
 cd ai-agents/Labfiles/05-agent-orchestration/Python
