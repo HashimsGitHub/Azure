@@ -18,7 +18,9 @@ pip install azure-identity agent-framework
 pip install python-dotenv
 pip install openai
 
-rm -r ai-agents -f
+if [ -d "ai-agents" ]; then
+    rm -rf ai-agents
+fi
 git clone https://github.com/MicrosoftLearning/mslearn-ai-agents ai-agents
 
 cd ai-agents/Labfiles/05-agent-orchestration/Python
