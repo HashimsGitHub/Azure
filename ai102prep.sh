@@ -25,4 +25,4 @@ git clone https://github.com/MicrosoftLearning/mslearn-ai-agents ai-agents
 
 cd ai-agents/Labfiles/05-agent-orchestration/Python
 
-python3 azurelogin.py
+
