@@ -77,9 +77,9 @@ param (
     [switch]$AuditLegacyTls
 )
 
-# --------------------------------------------------
+
 # TLS support test (safe / isolated)
-# --------------------------------------------------
+
 function Test-TlsSupport {
     param (
         [string]$TargetHost,
@@ -119,9 +119,9 @@ function Test-TlsSupport {
     }
 }
 
-# --------------------------------------------------
+
 # Main SSL inspection
-# --------------------------------------------------
+
 function Get-SSLCertificateInfo {
     param (
         [string]$TargetHost,
@@ -134,9 +134,9 @@ function Get-SSLCertificateInfo {
     $sslStream = $null
 
     try {
-        # -------------------------
+        
         # TCP connectivity
-        # -------------------------
+        
         $tcpClient = New-Object System.Net.Sockets.TcpClient
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
 
@@ -147,9 +147,9 @@ function Get-SSLCertificateInfo {
 
         $sw.Stop()
 
-        # -------------------------
+        
         # TLS handshake (safe, OS‑negotiated)
-        # -------------------------
+        
         $sslStream = New-Object System.Net.Security.SslStream(
             $tcpClient.GetStream(),
             $false,
@@ -165,9 +165,9 @@ function Get-SSLCertificateInfo {
         $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 `
             $sslStream.RemoteCertificate
 
-        # -------------------------
+        
         # Negotiated TLS detection
-        # -------------------------
+        
         $rawProto = $sslStream.SslProtocol.ToString()
 
         $tlsVersion = switch ($rawProto) {
@@ -178,15 +178,15 @@ function Get-SSLCertificateInfo {
             default { $rawProto.ToUpper() }
         }
 
-        # -------------------------
+        
         # Crypto
-        # -------------------------
+        
         $cipherName = $sslStream.CipherAlgorithm.ToString().ToUpper()
         $hashName   = $sslStream.HashAlgorithm.ToString().ToUpper()
 
-        # -------------------------
+        
         # SAN extraction
-        # -------------------------
+        
         $sanExtension = $cert.Extensions |
             Where-Object { $_.Oid.FriendlyName -eq "Subject Alternative Name" }
 
@@ -196,9 +196,9 @@ function Get-SSLCertificateInfo {
             ) -join "; "
         } else { "NONE" }
 
-        # -------------------------
+        
         # Certificate chain
-        # -------------------------
+        
         $chain = New-Object System.Security.Cryptography.X509Certificates.X509Chain
         $chain.ChainPolicy.RevocationMode = "NoCheck"
         $chain.ChainPolicy.VerificationFlags = "IgnoreWrongUsage"
@@ -219,9 +219,9 @@ function Get-SSLCertificateInfo {
             $certificateType = "PRIVATE / INTERNAL CA"
         }
 
-        # -------------------------
+        
         # Legacy TLS audit
-        # -------------------------
+        
         $supportedTls = @()
         $legacyTlsEnabled = $false
 
@@ -241,9 +241,9 @@ function Get-SSLCertificateInfo {
                 ($supportedTls -contains "TLS1.1")
         }
 
-        # -------------------------
+        
         # Expiry calculation
-        # -------------------------
+        
         $daysRemaining = ($cert.NotAfter - (Get-Date)).Days
 
         # ✅ REQUIRED WARNING
@@ -254,9 +254,9 @@ function Get-SSLCertificateInfo {
             Write-Warning "WARNING: Certificate expires in $daysRemaining days"
         }
 
-        # -------------------------
+        
         # Output
-        # -------------------------
+        
         return [PSCustomObject]@{
             Host              = $TargetHost
             Port              = $Port
@@ -290,9 +290,9 @@ function Get-SSLCertificateInfo {
     }
 }
 
-# --------------------------------------------------
+
 # URI normalization & execution
-# --------------------------------------------------
+
 if ($Uri -notmatch '^https?://') {
     $Uri = "https://$Uri"
 }
