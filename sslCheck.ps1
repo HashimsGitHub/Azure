@@ -246,7 +246,7 @@ function Get-SSLCertificateInfo {
         
         $daysRemaining = ($cert.NotAfter - (Get-Date)).Days
 
-        # ✅ REQUIRED WARNING
+        # EXPIRY WARNING
         if ($daysRemaining -lt 0) {
             Write-Warning "WARNING: Certificate expired $([math]::Abs($daysRemaining)) days ago"
         }
