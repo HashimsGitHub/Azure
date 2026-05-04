@@ -1,10 +1,10 @@
 # Azure
 ## Code to help out in Azure cloud
 
-1. Azure Route Table - JSON to Excel converter
+1. Azure Route Table - JSON to Excel converter  
    http://azure-rt-json2excel.streamlit.app/
  
-2. Azure NSG (Network Security Group) rules - JSON to Excel converter
+2. Azure NSG (Network Security Group) rules - JSON to Excel converter  
    http://azure-nsg-json2excel.streamlit.app/
   
 3. PowerShell script and supporting files to bulk Deploy / Install TANIUM Client  
