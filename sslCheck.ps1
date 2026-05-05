@@ -55,7 +55,7 @@
 .NOTES
     Author      : Hashim Hilal
     Script Name : sslCheck.ps1
-    Version     : 2.1
+    Version     : 2.2
 
     - Negotiated TLS reflects the actual protocol used by the OS/client.
     - In TLS-intercepted networks (e.g. Zscaler), results reflect the client-to-proxy leg.
@@ -458,7 +458,7 @@ $targetHost = $parsedUri.Host
 if ($parsedUri.Port -ne -1) { $Port = $parsedUri.Port }
 
 Write-Host ""
-Write-Host "  SSL / TLS Connectivity Check  v2.1" -ForegroundColor Cyan
+Write-Host "  SSL / TLS Connectivity Check  v2.2 by Hashim Hilal" -ForegroundColor Cyan
 Write-Host "  Target : $targetHost : $Port"
 Write-Host "  Run at : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
 
