@@ -22,6 +22,11 @@
             as Invoke-WebRequest, browsers, and applications do.
             A failure here means real clients will reject the endpoint.
 
+        [Stage 3c] HTTP Response
+            Sends a real HTTP GET using Invoke-WebRequest and reports status code,
+            response time, and all response headers. Only runs if Stage 3b passes.
+            4xx/5xx responses are shown in full and queued as warnings.
+
         [Stage 4 — Optional] Legacy TLS Audit
             Safe isolated probes to detect which TLS versions the endpoint accepts.
             Enabled with -AuditLegacyTls. Does not affect the primary connection.
@@ -59,7 +64,7 @@
 .NOTES
     Author      : Hashim Hilal
     Script Name : sslCheck.ps1
-    Version     : 2.3
+    Version     : 2.4
 
     - Stage 3a uses certificate bypass for inspection purposes only.
     - Stage 3b uses real Windows trust validation — matches Invoke-WebRequest behaviour.
@@ -502,6 +507,116 @@ function Get-SSLCertificateInfo {
 
 #endregion
 
+#region ── Stage 3c - HTTP Response ────────────────────────────────────────────
+
+function Invoke-HTTPResponse {
+    param([string]$TargetUri, [int]$TimeoutMs)
+
+    Write-Section "Stage 3c - HTTP Response"
+    Write-Info "Sending HTTP GET request using real Windows trust chain..."
+
+    try {
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+
+        $response = Invoke-WebRequest `
+            -Uri             $TargetUri `
+            -Method          GET `
+            -TimeoutSec      ([math]::Ceiling($TimeoutMs / 1000)) `
+            -UseBasicParsing `
+            -ErrorAction     Stop
+
+        $sw.Stop()
+
+        $statusCode  = [int]$response.StatusCode
+        $statusDesc  = $response.StatusDescription
+        $statusColor = if    ($statusCode -lt 300) { "Green"  }
+                       elseif ($statusCode -lt 400) { "Cyan"   }
+                       elseif ($statusCode -lt 500) { "Yellow" }
+                       else                         { "Red"    }
+
+        Write-Pass "HTTP request succeeded"
+        Write-Status "Status"        "$statusCode $statusDesc"              $statusColor
+        Write-Status "Response time" "$($sw.ElapsedMilliseconds) ms"        "White"
+
+        # Headers — print all returned headers
+        Write-Host ""
+        Write-Host ("  {0,-26}" -f "Response Headers:") -ForegroundColor White
+        foreach ($key in $response.Headers.Keys) {
+            Write-Host ("    {0,-30} {1}" -f "${key}:", $response.Headers[$key]) -ForegroundColor DarkCyan
+        }
+
+        # Body size
+        $bodyBytes = if ($response.RawContentLength -gt 0) {
+            $response.RawContentLength
+        } elseif ($response.Content) {
+            [System.Text.Encoding]::UTF8.GetByteCount($response.Content)
+        } else { 0 }
+
+        Write-Host ""
+        Write-Status "Body size" "$bodyBytes bytes" "White"
+
+        if ($statusCode -ge 400) {
+            Add-Warning "HTTP $statusCode $statusDesc returned by the endpoint."
+        }
+
+        return [PSCustomObject]@{
+            StatusCode    = $statusCode
+            StatusDesc    = $statusDesc
+            ResponseMs    = $sw.ElapsedMilliseconds
+            Headers       = $response.Headers
+            BodyBytes     = $bodyBytes
+        }
+    }
+    catch [System.Net.WebException] {
+        $sw.Stop()
+        $webEx     = $_.Exception
+        $httpResp  = $webEx.Response -as [System.Net.HttpWebResponse]
+
+        if ($httpResp) {
+            # Got an HTTP error response (4xx / 5xx) — still useful output
+            $statusCode  = [int]$httpResp.StatusCode
+            $statusDesc  = $httpResp.StatusDescription
+            $statusColor = if ($statusCode -lt 500) { "Yellow" } else { "Red" }
+
+            Write-Host ""
+            Write-Status "Status"        "$statusCode $statusDesc"     $statusColor
+            Write-Status "Response time" "$($sw.ElapsedMilliseconds) ms" "White"
+            Write-Host ""
+            Write-Host ("  {0,-26}" -f "Response Headers:") -ForegroundColor White
+            foreach ($key in $httpResp.Headers.AllKeys) {
+                Write-Host ("    {0,-30} {1}" -f "${key}:", $httpResp.Headers[$key]) -ForegroundColor DarkCyan
+            }
+
+            Add-Warning "HTTP $statusCode $statusDesc returned by the endpoint."
+            return [PSCustomObject]@{
+                StatusCode = $statusCode
+                StatusDesc = $statusDesc
+                ResponseMs = $sw.ElapsedMilliseconds
+                Headers    = $httpResp.Headers
+                BodyBytes  = 0
+            }
+        }
+        else {
+            # No HTTP response at all — connection or TLS level failure
+            $errMsg = $webEx.Message
+            $inner  = if ($webEx.InnerException) { $webEx.InnerException.Message } else { $null }
+            Write-Fail "HTTP request FAILED: $errMsg"
+            if ($inner) { Write-Info "Detail: $inner" }
+            Add-Failure "HTTP request failed: $errMsg"
+            return $null
+        }
+    }
+    catch {
+        $sw.Stop()
+        $errMsg = $_.Exception.Message
+        Write-Fail "HTTP request FAILED: $errMsg"
+        Add-Failure "HTTP request failed: $errMsg"
+        return $null
+    }
+}
+
+#endregion
+
 #region ── Entry Point ───────────────────────────────────────────────────────────
 
 if ($Uri -notmatch '^https?://') { $Uri = "https://$Uri" }
@@ -510,7 +625,7 @@ $targetHost = $parsedUri.Host
 if ($parsedUri.Port -ne -1) { $Port = $parsedUri.Port }
 
 Write-Host ""
-Write-Host "  SSL / TLS Connectivity Check  v2.3 by Hashim Hilal" -ForegroundColor Cyan
+Write-Host "  SSL / TLS Connectivity Check  v2.4 by Hashim Hilal" -ForegroundColor Cyan
 Write-Host "  Target : $targetHost : $Port"
 Write-Host "  Run at : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
 
@@ -544,6 +659,16 @@ $trusted = Test-RealWorldTrust `
     -TargetHost $targetHost `
     -Port       $Port `
     -TimeoutMs  $TimeoutMs
+
+# Stage 3c - HTTP Response (only runs if Stage 3b passed)
+if ($trusted) {
+    $httpResult = Invoke-HTTPResponse `
+        -TargetUri  $Uri `
+        -TimeoutMs  $TimeoutMs
+} else {
+    Write-Section "Stage 3c - HTTP Response"
+    Write-Info "Skipped - real-world trust validation failed. Fix the certificate trust issue first."
+}
 
 # Warnings - all collected items printed once at the end
 Write-Section "Warnings"
