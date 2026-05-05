@@ -55,7 +55,7 @@
 .NOTES
     Author      : Hashim Hilal
     Script Name : sslCheck.ps1
-    Version     : 2.2
+    Version     : 2.1
 
     - Negotiated TLS reflects the actual protocol used by the OS/client.
     - In TLS-intercepted networks (e.g. Zscaler), results reflect the client-to-proxy leg.
@@ -297,14 +297,24 @@ function Get-SSLCertificateInfo {
                        elseif ($daysRemaining -lt 30) { "$daysRemaining days  (expires soon)"               }
                        else                           { "$daysRemaining days"                                }
 
-        # SANs
-        $sanExt = $cert.Extensions | Where-Object { $_.Oid.FriendlyName -eq "Subject Alternative Name" }
-        $sans   = if ($sanExt) {
-            ($sanExt.Format($true) -split "`r?`n" |
+        # SANs — parse into a flat list, then group by root domain for display
+        $sanExt  = $cert.Extensions | Where-Object { $_.Oid.FriendlyName -eq "Subject Alternative Name" }
+        $sanList = if ($sanExt) {
+            $sanExt.Format($true) -split "`r?`n" |
                 Where-Object { $_ -match '\S' } |
-                ForEach-Object { $_ -replace '^DNS Name=|^IP Address=', '' }
-            ) -join "; "
-        } else { "None" }
+                ForEach-Object { ($_ -replace '^DNS Name=|^IP Address=', '').Trim() } |
+                Where-Object { $_ -ne '' }
+        } else { @() }
+
+        # Group by root domain (last two labels); wildcards and IPs handled gracefully
+        $sanGroups = $sanList | Group-Object {
+            $e     = $_ -replace '^\*\.', ''
+            $parts = $e -split '\.'
+            if ($parts.Count -ge 2) { ($parts[-2..-1]) -join '.' } else { $e }
+        } | Sort-Object Name
+
+        # Flat string kept for the return object
+        $sans = if ($sanList.Count -gt 0) { $sanList -join "; " } else { "None" }
 
         # Certificate chain
         $chain = New-Object System.Security.Cryptography.X509Certificates.X509Chain
@@ -341,8 +351,17 @@ function Get-SSLCertificateInfo {
         Write-Status "Days Remaining" $expiryLabel                                  $expiryColor
         Write-Status "Certificate"    $certType
         Write-Status "Chain Valid"    $chainLabel                                   $chainColor
-        Write-Status "Root CA"        $rootCA                                       "Gray"
-        Write-Status "SANs"           $sans                                         "Gray"
+        Write-Status "Root CA"        $rootCA                                       "White"
+        # SANs grouped display
+        if ($sanList.Count -eq 0) {
+            Write-Status "SANs" "None" "White"
+        } else {
+            Write-Host ("  {0,-26} {1} entries across {2} domain(s)" -f "SANs:", $sanList.Count, $sanGroups.Count) -ForegroundColor White
+            foreach ($grp in $sanGroups) {
+                $entries = $grp.Group -join "  |  "
+                Write-Host ("    {0,-22} {1}" -f "$($grp.Name):", $entries) -ForegroundColor DarkCyan
+            }
+        }
         Write-Note   $certTypeNote
 
         # Queue expiry warnings (printed at end, not here)
@@ -439,7 +458,7 @@ $targetHost = $parsedUri.Host
 if ($parsedUri.Port -ne -1) { $Port = $parsedUri.Port }
 
 Write-Host ""
-Write-Host "  SSL / TLS Connectivity Check  v2.2" -ForegroundColor Cyan
+Write-Host "  SSL / TLS Connectivity Check  v2.1" -ForegroundColor Cyan
 Write-Host "  Target : $targetHost : $Port"
 Write-Host "  Run at : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
 
