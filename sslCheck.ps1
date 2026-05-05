@@ -17,6 +17,8 @@
             Connects with certificate bypass to inspect the cert regardless of trust.
             Reports TLS version, cipher, certificate details, SANs grouped by domain.
             Includes Certificate Transparency log verification for public certs.
+            Checks signature algorithm (flags MD5/SHA-1), key size (flags RSA <2048-bit),
+            and displays the full certificate chain from leaf to root.
 
         [Stage 3b] Real-World Trust Validation
             Connects WITHOUT bypass using the Windows certificate store - exactly
@@ -29,17 +31,13 @@
             4xx/5xx responses are shown in full and queued as warnings.
 
         [Stage 4 - Optional] Legacy TLS Audit
-            Safe isolated probes to detect which TLS versions the endpoint accepts.
+            Safe isolated probes covering SSL 2.0, SSL 3.0, TLS 1.0 through 1.3.
+            SSLv2/SSLv3 flagged as critical. TLS 1.0/1.1 flagged as deprecated.
             Enabled with -AuditLegacyTls. Does not affect the primary connection.
 
         [Connection Summary]
             Shown when all stages pass. Reports source IP, source hostname,
             destination IP, and destination hostname for the completed connection.
-
-        [ICMP Ping]
-            Sends 4 ICMP echo requests to the target. Always runs if TCP succeeded.
-            Reports packet loss, round-trip times, and TTL. Purely informational -
-            ICMP filtering does not affect HTTPS connectivity results.
 
         [Warnings]
             All advisory items and hard failures are collected during execution
@@ -83,7 +81,7 @@
 .NOTES
     Author      : Hashim Hilal
     Script Name : sslCheck.ps1
-    Version     : 2.8
+    Version     : 2.9
 
     - Stage 3a uses certificate bypass for inspection purposes only.
     - Stage 3b uses real Windows trust validation - matches Invoke-WebRequest behaviour.
@@ -154,6 +152,9 @@ $script:CipherNameMap = @{
     "TripleDes" = "3DES (legacy)"
     "None"      = "None (unencrypted)"
 }
+
+# Ciphers that should be flagged red regardless of strength value
+$script:WeakCiphers = @("RC4 (insecure)", "DES (insecure)", "RC2 (insecure)", "3DES (legacy)", "None (unencrypted)")
 
 #endregion
 
@@ -414,7 +415,12 @@ function Get-SSLCertificateInfo {
         } else {
             $cipherAlgo.ToUpper()
         }
-        Write-Status "Cipher"         "$cipherName  ($($sslStream.CipherStrength)-bit)"
+        $cipherColor = if ($script:WeakCiphers -contains $cipherName) { "Red" } else { "White" }
+        $cipherWeak  = $script:WeakCiphers -contains $cipherName
+        Write-Status "Cipher"         "$cipherName  ($($sslStream.CipherStrength)-bit)" $cipherColor
+        if ($cipherWeak) {
+            Add-Warning "Weak cipher negotiated: $cipherName. This cipher is insecure and should be disabled on the server."
+        }
         Write-Status "Hash"           $sslStream.HashAlgorithm.ToString().ToUpper()
         Write-Status "Handshake time" "$($sw.ElapsedMilliseconds) ms"
         Write-Status "SNI Sent"       $TargetHost "Green"
@@ -515,8 +521,31 @@ function Get-SSLCertificateInfo {
             "Not available"
         } else { $rootCA }
 
+        # Signature algorithm - flag MD5 and SHA-1 as weak
+        $sigAlgo      = $cert.SignatureAlgorithm.FriendlyName
+        $sigAlgoColor = if ($sigAlgo -match 'md5|sha1(?![\d])') { "Red" } else { "White" }
+        if ($sigAlgo -match 'md5') {
+            Add-Warning "Certificate signed with MD5 - this is cryptographically broken and must be replaced."
+        } elseif ($sigAlgo -match 'sha1(?![\d])') {
+            Add-Warning "Certificate signed with SHA-1 - this is deprecated and rejected by modern browsers."
+        }
+
+        # Public key type and size
+        $pubKey     = $cert.PublicKey
+        $keyAlgo    = $pubKey.Oid.FriendlyName
+        $keySize    = try { $pubKey.Key.KeySize } catch { 0 }
+        $keySizeDisplay = if ($keySize -gt 0) { "$keySize-bit" } else { "Unknown" }
+        $keySizeColor   = if ($keyAlgo -match 'RSA' -and $keySize -gt 0 -and $keySize -lt 2048) { "Red" }
+                          elseif ($keyAlgo -match 'RSA' -and $keySize -gt 0 -and $keySize -lt 4096) { "Yellow" }
+                          else { "White" }
+        if ($keyAlgo -match 'RSA' -and $keySize -gt 0 -and $keySize -lt 2048) {
+            Add-Warning "RSA key is only $keySize-bit. Keys under 2048-bit are considered insecure."
+        }
+
         Write-Status "Subject"        $cert.Subject
         Write-Status "Issuer"         $cert.Issuer
+        Write-Status "Sig Algorithm"  $sigAlgo                                         $sigAlgoColor
+        Write-Status "Key Type"       "$keyAlgo  ($keySizeDisplay)"                    $keySizeColor
         Write-Status "Thumbprint"     $cert.Thumbprint.ToLower()
         Write-Status "Serial"         $cert.SerialNumber.ToLower()
         Write-Status "Valid From"     $cert.NotBefore.ToString("yyyy-MM-dd HH:mm")
@@ -526,6 +555,28 @@ function Get-SSLCertificateInfo {
         Write-Status "Chain Valid"    $chainLabel                                   $chainColor
         Write-Status "Root CA"        $rootCADisplay                                "White"
         Write-Note   $certTypeNote
+
+        # Full certificate chain display
+        Write-Host ""
+        Write-Host ("  {0,-26}" -f "Certificate Chain:") -ForegroundColor White
+        if ($chain.ChainElements.Count -gt 0) {
+            for ($ci = 0; $ci -lt $chain.ChainElements.Count; $ci++) {
+                $el      = $chain.ChainElements[$ci]
+                $elCert  = $el.Certificate
+                $elLabel = if ($ci -eq 0) { "Leaf (end-entity)" }
+                           elseif ($ci -eq $chain.ChainElements.Count - 1) { "Root CA" }
+                           else { "Intermediate CA" }
+                $indent  = "    " + ("  " * $ci)
+                $elExpiry = ($elCert.NotAfter - (Get-Date)).Days
+                $elColor  = if ($elExpiry -lt 0) { "Red" } elseif ($elExpiry -lt 30) { "Yellow" } else { "DarkCyan" }
+                Write-Host ("${indent}[$($ci+1)] $elLabel") -ForegroundColor White
+                Write-Host ("${indent}    Subject : $($elCert.Subject)") -ForegroundColor $elColor
+                Write-Host ("${indent}    Issuer  : $($elCert.Issuer)") -ForegroundColor DarkGray
+                Write-Host ("${indent}    Expires : $($elCert.NotAfter.ToString('yyyy-MM-dd'))  ($elExpiry days)") -ForegroundColor $elColor
+            }
+        } else {
+            Write-Host "    Chain not available" -ForegroundColor DarkGray
+        }
 
         # Certificate Transparency check for public certs
         if ($certType -eq "Publicly Trusted CA") {
@@ -578,6 +629,8 @@ function Get-SSLCertificateInfo {
             Write-Section "Stage 4 - TLS Version Audit  (non-destructive probes)"
 
             $probes    = @(
+                @{ Label="SSL 2.0"; Enum="Ssl2"  },
+                @{ Label="SSL 3.0"; Enum="Ssl3"  },
                 @{ Label="TLS 1.0"; Enum="Tls"   },
                 @{ Label="TLS 1.1"; Enum="Tls11" },
                 @{ Label="TLS 1.2"; Enum="Tls12" },
@@ -596,17 +649,20 @@ function Get-SSLCertificateInfo {
 
                 if ($ok) {
                     $supportedTls += $p.Label
-                    $legacy = $p.Label -in "TLS 1.0","TLS 1.1"
-                    $suffix = if ($legacy) { "  <- deprecated" } else { "" }
-                    $color  = if ($legacy) { "Yellow" } else { "Green" }
+                    $critical = $p.Label -in "SSL 2.0","SSL 3.0"
+                    $legacy   = $p.Label -in "TLS 1.0","TLS 1.1"
+                    $suffix   = if ($critical) { "  <- CRITICAL" } elseif ($legacy) { "  <- deprecated" } else { "" }
+                    $color    = if ($critical) { "Red" } elseif ($legacy) { "Yellow" } else { "Green" }
                     Write-Status $p.Label "Accepted$suffix" $color
-                    if ($legacy) { Add-Warning "Server accepts $($p.Label) which is deprecated. Disable it on the server." }
+                    if ($critical) { Add-Warning "Server accepts $($p.Label) which is critically insecure (POODLE/DROWN). Disable immediately." }
+                    elseif ($legacy) { Add-Warning "Server accepts $($p.Label) which is deprecated. Disable it on the server." }
                 } else {
                     Write-Status $p.Label "Rejected" "DarkGray"
                 }
             }
 
-            $legacyTlsEnabled = ($supportedTls -contains "TLS 1.0") -or ($supportedTls -contains "TLS 1.1")
+            $legacyTlsEnabled = ($supportedTls -contains "SSL 2.0") -or ($supportedTls -contains "SSL 3.0") -or
+                                ($supportedTls -contains "TLS 1.0") -or ($supportedTls -contains "TLS 1.1")
         }
 
         return [PSCustomObject]@{
@@ -866,6 +922,7 @@ function Write-ConnectionSummary {
 
 #endregion
 
+
 #region -- ICMP Ping -------------------------------------------------------------
 
 function Invoke-ICMPPing {
@@ -907,7 +964,7 @@ function Invoke-ICMPPing {
                 if ($reply.Status -eq 'Success') {
                     $pingSuccess++
                     $pingTimes += $reply.RoundtripTime
-                    $ttl = if ($reply.Options -and $reply.Options.Ttl) { $reply.Options.Ttl } else { 0 }
+                    $ttl = if ($reply.Options) { $reply.Options.Ttl } else { 0 }
                     $ttlDisplay = if ($ttl -gt 0) { " TTL=$ttl" } else { "" }
                     Write-Host ("    Reply from {0}: bytes=32 time={1}ms{2}" -f `
                         $reply.Address.ToString(), $reply.RoundtripTime, $ttlDisplay) -ForegroundColor Green
@@ -989,7 +1046,7 @@ catch {
 }
 
 Write-Host ""
-Write-Host "  SSL / TLS Connectivity Check  v2.8 by Hashim Hilal" -ForegroundColor Cyan
+Write-Host "  SSL / TLS Connectivity Check  v2.9 by Hashim Hilal" -ForegroundColor Cyan
 Write-Host "  Target : $targetHost : $Port"
 Write-Host "  Run at : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
 
