@@ -379,7 +379,15 @@ function Get-SSLCertificateInfo {
         $chain.ChainPolicy.VerificationFlags = "IgnoreWrongUsage"
         $chainValid = $chain.Build($cert)
         $rootCA = if ($chain.ChainElements.Count -gt 0) {
-            $chain.ChainElements[-1].Certificate.Subject
+            $rootCert = $chain.ChainElements[-1].Certificate
+            if ($null -eq $rootCert) {
+                "Unknown"
+            } elseif ([string]::IsNullOrWhiteSpace($rootCert.Subject)) {
+                $thumb = if ($rootCert.Thumbprint) { $rootCert.Thumbprint.ToLower() } else { "unavailable" }
+                "Thumbprint: $thumb  (subject not available)"
+            } else {
+                $rootCert.Subject
+            }
         } else { "Unknown" }
 
         # CA classification
@@ -409,7 +417,10 @@ function Get-SSLCertificateInfo {
         Write-Status "Days Remaining" $expiryLabel                                  $expiryColor
         Write-Status "Certificate"    $certType
         Write-Status "Chain Valid"    $chainLabel                                   $chainColor
-        Write-Status "Root CA"        $rootCA                                       "White"
+        $rootCADisplay = if ([string]::IsNullOrWhiteSpace($rootCA) -or $rootCA -eq "Unknown") {
+            "Not available"
+        } else { $rootCA }
+        Write-Status "Root CA"        $rootCADisplay                                "White"
         Write-Note   $certTypeNote
 
         # SANs grouped display
@@ -419,7 +430,7 @@ function Get-SSLCertificateInfo {
             Write-Host ("  {0,-26} {1} entries across {2} domain(s)" -f "SANs:", $sanList.Count, $sanGroups.Count) -ForegroundColor White
             foreach ($grp in $sanGroups) {
                 $entries = $grp.Group -join "  |  "
-                Write-Host ("    {0,-22} {1}" -f "$($grp.Name):", $entries) -ForegroundColor DarkCyan
+                Write-Host ("    {0,-28} {1}" -f "$($grp.Name):", $entries) -ForegroundColor DarkCyan
             }
         }
 
