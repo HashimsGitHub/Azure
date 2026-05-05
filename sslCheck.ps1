@@ -592,8 +592,8 @@ function Get-SSLCertificateInfo {
         # Chain validation errors
         if ($chainErrors.Count -gt 0) {
             Write-Info "Chain validation details:"
-            foreach ($error in $chainErrors) {
-                Write-Info "  - $error"
+            foreach ($chainError in $chainErrors) {
+                Write-Info "  - $chainError"
             }
         }
 
@@ -713,10 +713,11 @@ function Invoke-HTTPResponse {
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
 
         $response = Invoke-WebRequest `
-            -Uri         $TargetUri `
-            -Method      GET `
-            -TimeoutSec  ([math]::Ceiling($TimeoutMs / 1000)) `
-            -ErrorAction Stop
+            -Uri                $TargetUri `
+            -Method             GET `
+            -TimeoutSec         ([math]::Ceiling($TimeoutMs / 1000)) `
+            -MaximumRedirection 0 `
+            -ErrorAction        SilentlyContinue
 
         $sw.Stop()
 
@@ -822,18 +823,36 @@ function Invoke-HTTPResponse {
         if ($httpResp) {
             $statusCode  = [int]$httpResp.StatusCode
             $statusDesc  = $httpResp.StatusDescription
-            $statusColor = if ($statusCode -lt 500) { "Yellow" } else { "Red" }
+            $statusColor = if    ($statusCode -lt 300) { "Green"  }
+                           elseif ($statusCode -lt 400) { "Cyan"   }
+                           elseif ($statusCode -lt 500) { "Yellow" }
+                           else                         { "Red"    }
 
             Write-Host ""
             Write-Status "Status"        "$statusCode $statusDesc"          $statusColor
             Write-Status "Response time" "$($sw.ElapsedMilliseconds) ms"    "White"
+
+            # Show redirect location if present
+            $location = $httpResp.Headers["Location"]
+            if ($location) {
+                Write-Status "Redirect-To"  $location "Cyan"
+                if ($location -match 'SAMLRequest|SAMLResponse|login|sso|oauth|authorize') {
+                    Write-Note "Endpoint redirects to an authentication/SSO page. Authentication is required to access this resource."
+                    Write-Info "Stage 3c reports the redirect only - no browser was opened by this script"
+                }
+            }
+
             Write-Host ""
             Write-Host ("  {0,-26}" -f "Response Headers:") -ForegroundColor White
             foreach ($key in $httpResp.Headers.AllKeys) {
                 Write-Host ("    {0,-30} {1}" -f "${key}:", $httpResp.Headers[$key]) -ForegroundColor DarkCyan
             }
 
-            Add-Warning "HTTP $statusCode $statusDesc returned by the endpoint."
+            if ($statusCode -ge 400) {
+                Add-Warning "HTTP $statusCode $statusDesc returned by the endpoint."
+            } elseif ($statusCode -ge 300) {
+                Add-Warning "HTTP $statusCode $statusDesc - endpoint requires a redirect (SSO/auth wall). Stage 3c cannot follow redirects to prevent browser popups."
+            }
             return [PSCustomObject]@{
                 StatusCode = $statusCode
                 StatusDesc = $statusDesc
@@ -931,7 +950,6 @@ function Invoke-ICMPPing {
     Write-Section "ICMP Ping  ->  $TargetHost"
 
     try {
-        $pingResults = @()
         $pingSuccess = 0
         $pingFailed  = 0
         $pingTimes   = @()
@@ -1086,13 +1104,12 @@ if (-not $reachable) {
 }
 
 # Stage 3a - TLS Handshake & Certificate Inspection
-$result = $null
 try {
-    $result = Get-SSLCertificateInfo `
+    [void](Get-SSLCertificateInfo `
         -TargetHost     $targetHost `
         -Port           $Port `
         -TimeoutMs      $TimeoutMs `
-        -AuditLegacyTls:$AuditLegacyTls
+        -AuditLegacyTls:$AuditLegacyTls)
 }
 catch {
     Write-GracefulExit -Stage "Stage 3a (TLS Inspection)" -Reason $_.Exception.Message
@@ -1113,12 +1130,11 @@ catch {
 }
 
 # Stage 3c - HTTP Response (only if Stage 3b passed)
-$httpResult = $null
 try {
     if ($trusted) {
-        $httpResult = Invoke-HTTPResponse `
+        [void](Invoke-HTTPResponse `
             -TargetUri $Uri `
-            -TimeoutMs $TimeoutMs
+            -TimeoutMs $TimeoutMs)
     } else {
         Write-Section "Stage 3c - HTTP Response"
         Write-Info "Skipped - real-world trust validation failed. Fix the certificate trust issue first."
