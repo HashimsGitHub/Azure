@@ -13,17 +13,22 @@
             Attempts a TCP connection on the target port.
             Runs a fast Traceroute on failure to identify where traffic is dropped.
 
-        [Stage 3] TLS Handshake & Certificate Inspection
-            Only runs when TCP is confirmed. Negotiates TLS, inspects the certificate,
-            extracts SANs, builds the chain, and classifies the CA type.
+        [Stage 3a] TLS Handshake & Certificate Inspection
+            Connects with certificate bypass to inspect the cert regardless of trust.
+            Reports TLS version, cipher, certificate details, SANs grouped by domain.
+
+        [Stage 3b] Real-World Trust Validation
+            Connects WITHOUT bypass using the Windows certificate store — exactly
+            as Invoke-WebRequest, browsers, and applications do.
+            A failure here means real clients will reject the endpoint.
 
         [Stage 4 — Optional] Legacy TLS Audit
             Safe isolated probes to detect which TLS versions the endpoint accepts.
             Enabled with -AuditLegacyTls. Does not affect the primary connection.
 
         [Warnings]
-            All advisory items (expiry, deprecated TLS, chain issues) are collected
-            during execution and printed together at the end in one place.
+            All advisory items and hard failures are collected during execution
+            and printed together at the end in one place.
 
     No HTTP content is downloaded. This is a read-only security and connectivity check.
 
@@ -38,7 +43,6 @@
 
 .PARAMETER TraceRouteHops
     Maximum hops for Traceroute when TCP fails. Default: 15.
-    Keeping this low ensures the trace completes in a few seconds.
 
 .PARAMETER AuditLegacyTls
     Probe which TLS versions (1.0-1.3) the endpoint accepts. Non-destructive.
@@ -55,9 +59,10 @@
 .NOTES
     Author      : Hashim Hilal
     Script Name : sslCheck.ps1
-    Version     : 2.2
+    Version     : 2.3
 
-    - Negotiated TLS reflects the actual protocol used by the OS/client.
+    - Stage 3a uses certificate bypass for inspection purposes only.
+    - Stage 3b uses real Windows trust validation — matches Invoke-WebRequest behaviour.
     - In TLS-intercepted networks (e.g. Zscaler), results reflect the client-to-proxy leg.
     - Traceroute uses Test-NetConnection -TraceRoute (ICMP, Windows 8+ / PS 4.0+).
 #>
@@ -76,7 +81,6 @@ param (
 
 #region ── Helpers ───────────────────────────────────────────────────────────────
 
-# Warnings and failures are collected during all stages and printed once at the end
 $script:WarningLog = [System.Collections.Generic.List[string]]::new()
 $script:FailLog    = [System.Collections.Generic.List[string]]::new()
 function Add-Warning { param([string]$msg) $script:WarningLog.Add($msg) }
@@ -86,9 +90,9 @@ function Write-Section {
     param([string]$Title)
     $line = "-" * 62
     Write-Host ""
-    Write-Host $line       -ForegroundColor DarkGray
-    Write-Host "  $Title"  -ForegroundColor Cyan
-    Write-Host $line       -ForegroundColor DarkGray
+    Write-Host $line      -ForegroundColor DarkGray
+    Write-Host "  $Title" -ForegroundColor Cyan
+    Write-Host $line      -ForegroundColor DarkGray
 }
 
 function Write-Status {
@@ -235,7 +239,56 @@ function Test-TlsSupport {
 
 #endregion
 
-#region ── Stage 3 - TLS Handshake & Certificate Inspection ─────────────────────
+#region ── Stage 3b - Real-World Trust Validation ───────────────────────────────
+
+function Test-RealWorldTrust {
+    param([string]$TargetHost, [int]$Port, [int]$TimeoutMs)
+
+    Write-Section "Stage 3b - Real-World Trust Validation"
+    Write-Info "Connecting using Windows certificate store (no bypass)..."
+
+    $tcp = $null; $ssl = $null
+    try {
+        $tcp = New-Object System.Net.Sockets.TcpClient
+        $tcp.ConnectAsync($TargetHost, $Port).Wait($TimeoutMs) | Out-Null
+
+        # No { $true } callback — uses real Windows trust chain validation
+        $ssl = New-Object System.Net.Security.SslStream(
+            $tcp.GetStream(),
+            $false
+        )
+        $ssl.AuthenticateAsClient($TargetHost)
+
+        Write-Pass "Real-world trust validation PASSED"
+        Write-Info "Invoke-WebRequest and applications will trust this endpoint"
+        return $true
+    }
+    catch {
+        $errMsg = $_.Exception.Message
+
+        # Unwrap inner exception for a cleaner reason
+        $reason = if ($_.Exception.InnerException) {
+            $_.Exception.InnerException.Message
+        } else {
+            $errMsg
+        }
+
+        Write-Fail "Real-world trust validation FAILED"
+        Write-Status "Reason" $reason "Red"
+        Write-Status "Impact" "Invoke-WebRequest, browsers and applications will reject this endpoint" "Yellow"
+        Write-Status "Fix"    "Import the issuing CA into the Trusted Root / Intermediate certificate store" "Yellow"
+        Add-Failure "Real-world trust validation failed: $reason"
+        return $false
+    }
+    finally {
+        if ($ssl) { $ssl.Dispose() }
+        if ($tcp) { $tcp.Dispose() }
+    }
+}
+
+#endregion
+
+#region ── Stage 3a - TLS Handshake & Certificate Inspection ────────────────────
 
 function Get-SSLCertificateInfo {
     param([string]$TargetHost, [int]$Port, [int]$TimeoutMs, [switch]$AuditLegacyTls)
@@ -243,8 +296,9 @@ function Get-SSLCertificateInfo {
     $tcpClient = $null; $sslStream = $null
 
     try {
-        # ── TLS Handshake ─────────────────────────────────────────────────────
-        Write-Section "Stage 3 - TLS Handshake"
+        # ── TLS Handshake (bypass for inspection) ─────────────────────────────
+        Write-Section "Stage 3a - TLS Handshake & Certificate Inspection"
+        Write-Info "Connecting with certificate bypass for inspection..."
 
         $tcpClient = New-Object System.Net.Sockets.TcpClient
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
@@ -297,7 +351,7 @@ function Get-SSLCertificateInfo {
                        elseif ($daysRemaining -lt 30) { "$daysRemaining days  (expires soon)"               }
                        else                           { "$daysRemaining days"                                }
 
-        # SANs — parse into a flat list, then group by root domain for display
+        # SANs - grouped by root domain
         $sanExt  = $cert.Extensions | Where-Object { $_.Oid.FriendlyName -eq "Subject Alternative Name" }
         $sanList = if ($sanExt) {
             $sanExt.Format($true) -split "`r?`n" |
@@ -306,17 +360,15 @@ function Get-SSLCertificateInfo {
                 Where-Object { $_ -ne '' }
         } else { @() }
 
-        # Group by root domain (last two labels); wildcards and IPs handled gracefully
         $sanGroups = $sanList | Group-Object {
             $e     = $_ -replace '^\*\.', ''
             $parts = $e -split '\.'
             if ($parts.Count -ge 2) { ($parts[-2..-1]) -join '.' } else { $e }
         } | Sort-Object Name
 
-        # Flat string kept for the return object
         $sans = if ($sanList.Count -gt 0) { $sanList -join "; " } else { "None" }
 
-        # Certificate chain
+        # Chain validation
         $chain = New-Object System.Security.Cryptography.X509Certificates.X509Chain
         $chain.ChainPolicy.RevocationMode    = "NoCheck"
         $chain.ChainPolicy.VerificationFlags = "IgnoreWrongUsage"
@@ -325,7 +377,7 @@ function Get-SSLCertificateInfo {
             $chain.ChainElements[-1].Certificate.Subject
         } else { "Unknown" }
 
-        # CA type — informational classification only
+        # CA classification
         $certType = if ($cert.Subject -eq $cert.Issuer) {
             "Self-Signed"
         } elseif ($rootCA -match '(?i)DIGICERT|GLOBALSIGN|SECTIGO|ENTRUST|LET.?S ENCRYPT|GODADDY|VERISIGN|GEOTRUST|AMAZON|MICROSOFT|ZSCALER') {
@@ -334,11 +386,10 @@ function Get-SSLCertificateInfo {
             "Private / Internal CA"
         }
 
-        # Neutral, context-aware note for each cert type
         $certTypeNote = switch ($certType) {
-            "Self-Signed"           { "Self-signed certificate. Normal for internal services, dev, and test endpoints." }
-            "Publicly Trusted CA"   { "Issued by a globally trusted CA, or a TLS inspection proxy (e.g. Zscaler)."     }
-            "Private / Internal CA" { "Issued by an internal CA. Normal in enterprise environments."                   }
+            "Self-Signed"           { "Self-signed certificate. Expected for internal and test endpoints."         }
+            "Publicly Trusted CA"   { "Issued by a globally trusted CA, or a TLS inspection proxy (e.g. Zscaler)." }
+            "Private / Internal CA" { "Issued by an internal CA. Normal in enterprise environments."               }
         }
 
         $chainLabel = if ($chainValid) { "Yes" } else { "No  (expected for self-signed / private CA certs)" }
@@ -352,6 +403,8 @@ function Get-SSLCertificateInfo {
         Write-Status "Certificate"    $certType
         Write-Status "Chain Valid"    $chainLabel                                   $chainColor
         Write-Status "Root CA"        $rootCA                                       "White"
+        Write-Note   $certTypeNote
+
         # SANs grouped display
         if ($sanList.Count -eq 0) {
             Write-Status "SANs" "None" "White"
@@ -362,9 +415,8 @@ function Get-SSLCertificateInfo {
                 Write-Host ("    {0,-22} {1}" -f "$($grp.Name):", $entries) -ForegroundColor DarkCyan
             }
         }
-        Write-Note   $certTypeNote
 
-        # Queue expiry warnings (printed at end, not here)
+        # Queue expiry warnings
         if ($daysRemaining -lt 0) {
             Add-Warning "Certificate EXPIRED $([math]::Abs($daysRemaining)) days ago. HTTPS will fail for clients enforcing cert validation."
         } elseif ($daysRemaining -lt 30) {
@@ -416,24 +468,24 @@ function Get-SSLCertificateInfo {
         }
 
         return [PSCustomObject]@{
-            Host             = $TargetHost
-            Port             = $Port
-            HandshakeMs      = $sw.ElapsedMilliseconds
-            NegotiatedTLS    = $tlsVersion
-            CipherAlgorithm  = $sslStream.CipherAlgorithm.ToString().ToUpper()
-            CipherStrength   = $sslStream.CipherStrength
-            HashAlgorithm    = $sslStream.HashAlgorithm.ToString().ToUpper()
-            Subject          = $cert.Subject
-            Issuer           = $cert.Issuer
-            NotBefore        = $cert.NotBefore
-            NotAfter         = $cert.NotAfter
-            DaysRemaining    = $daysRemaining
-            SANs             = $sans
-            CertificateType  = $certType
-            ChainValid       = $chainValid
-            RootCA           = $rootCA
-            SupportedTLS     = $supportedTls
-            LegacyTLSEnabled = $legacyTlsEnabled
+            Host              = $TargetHost
+            Port              = $Port
+            HandshakeMs       = $sw.ElapsedMilliseconds
+            NegotiatedTLS     = $tlsVersion
+            CipherAlgorithm   = $sslStream.CipherAlgorithm.ToString().ToUpper()
+            CipherStrength    = $sslStream.CipherStrength
+            HashAlgorithm     = $sslStream.HashAlgorithm.ToString().ToUpper()
+            Subject           = $cert.Subject
+            Issuer            = $cert.Issuer
+            NotBefore         = $cert.NotBefore
+            NotAfter          = $cert.NotAfter
+            DaysRemaining     = $daysRemaining
+            SANs              = $sans
+            CertificateType   = $certType
+            ChainValid        = $chainValid
+            RootCA            = $rootCA
+            SupportedTLS      = $supportedTls
+            LegacyTLSEnabled  = $legacyTlsEnabled
         }
     }
     catch {
@@ -458,17 +510,14 @@ $targetHost = $parsedUri.Host
 if ($parsedUri.Port -ne -1) { $Port = $parsedUri.Port }
 
 Write-Host ""
-Write-Host "  SSL / TLS Connectivity Check  v2.2 by Hashim Hilal" -ForegroundColor Cyan
+Write-Host "  SSL / TLS Connectivity Check  v2.3 by Hashim Hilal" -ForegroundColor Cyan
 Write-Host "  Target : $targetHost : $Port"
 Write-Host "  Run at : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
 
 # Stage 1 - DNS
 $dns = Resolve-TargetHost -Hostname $targetHost
 if (-not $dns.Success) {
-    Write-Host ""
-    Write-Fail "Halted - DNS resolution failed."
-    Write-Host ""
-    exit 1
+    Write-Host ""; Write-Fail "Halted - DNS resolution failed."; Write-Host ""; exit 1
 }
 
 # Stage 2 - TCP
@@ -480,25 +529,26 @@ $reachable = Test-TCPReachability `
     -SkipTraceroute $SkipTraceroute.IsPresent
 
 if (-not $reachable) {
-    Write-Host ""
-    Write-Fail "Halted - TCP connection failed."
-    Write-Host ""
-    exit 2
+    Write-Host ""; Write-Fail "Halted - TCP connection failed."; Write-Host ""; exit 2
 }
 
-# Stage 3 (+4) - TLS & Certificate
+# Stage 3a - TLS Handshake & Certificate Inspection (bypass for inspection)
 $result = Get-SSLCertificateInfo `
     -TargetHost     $targetHost `
     -Port           $Port `
     -TimeoutMs      $TimeoutMs `
     -AuditLegacyTls:$AuditLegacyTls
 
-# Warnings - all collected items printed once, at the end
+# Stage 3b - Real-World Trust Validation (no bypass)
+$trusted = Test-RealWorldTrust `
+    -TargetHost $targetHost `
+    -Port       $Port `
+    -TimeoutMs  $TimeoutMs
+
+# Warnings - all collected items printed once at the end
 Write-Section "Warnings"
 if ($script:FailLog.Count -gt 0) {
-    foreach ($f in $script:FailLog) {
-        Write-Fail $f
-    }
+    foreach ($f in $script:FailLog) { Write-Fail $f }
 }
 if ($script:WarningLog.Count -gt 0) {
     $i = 1
