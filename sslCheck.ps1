@@ -402,6 +402,8 @@ function Get-SSLCertificateInfo {
 
         Write-Status "Subject"        $cert.Subject
         Write-Status "Issuer"         $cert.Issuer
+        Write-Status "Thumbprint"     $cert.Thumbprint.ToLower()
+        Write-Status "Serial"         $cert.SerialNumber.ToLower()
         Write-Status "Valid From"     $cert.NotBefore.ToString("yyyy-MM-dd HH:mm")
         Write-Status "Valid To"       $cert.NotAfter.ToString("yyyy-MM-dd HH:mm")   $expiryColor
         Write-Status "Days Remaining" $expiryLabel                                  $expiryColor
