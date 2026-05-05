@@ -64,7 +64,7 @@
 .NOTES
     Author      : Hashim Hilal
     Script Name : sslCheck.ps1
-    Version     : 2.4
+    Version     : 2.5
 
     - Stage 3a uses certificate bypass for inspection purposes only.
     - Stage 3b uses real Windows trust validation — matches Invoke-WebRequest behaviour.
@@ -521,11 +521,10 @@ function Invoke-HTTPResponse {
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
 
         $response = Invoke-WebRequest `
-            -Uri             $TargetUri `
-            -Method          GET `
-            -TimeoutSec      ([math]::Ceiling($TimeoutMs / 1000)) `
-            -UseBasicParsing `
-            -ErrorAction     Stop
+            -Uri         $TargetUri `
+            -Method      GET `
+            -TimeoutSec  ([math]::Ceiling($TimeoutMs / 1000)) `
+            -ErrorAction Stop
 
         $sw.Stop()
 
@@ -537,17 +536,73 @@ function Invoke-HTTPResponse {
                        else                         { "Red"    }
 
         Write-Pass "HTTP request succeeded"
-        Write-Status "Status"        "$statusCode $statusDesc"              $statusColor
-        Write-Status "Response time" "$($sw.ElapsedMilliseconds) ms"        "White"
-
-        # Headers — print all returned headers
         Write-Host ""
-        Write-Host ("  {0,-26}" -f "Response Headers:") -ForegroundColor White
+
+        # ── Status & timing ───────────────────────────────────────────────────
+        Write-Status "StatusCode"        "$statusCode"      $statusColor
+        Write-Status "StatusDescription" $statusDesc        $statusColor
+        Write-Status "Response time"     "$($sw.ElapsedMilliseconds) ms" "White"
+
+        # ── Headers ───────────────────────────────────────────────────────────
+        Write-Host ""
+        Write-Host ("  {0,-26}" -f "Headers:") -ForegroundColor White
         foreach ($key in $response.Headers.Keys) {
             Write-Host ("    {0,-30} {1}" -f "${key}:", $response.Headers[$key]) -ForegroundColor DarkCyan
         }
 
-        # Body size
+        # ── Images ────────────────────────────────────────────────────────────
+        $imageCount = if ($response.Images) { $response.Images.Count } else { 0 }
+        Write-Host ""
+        Write-Host ("  {0,-26}" -f "Images:") -ForegroundColor White
+        if ($imageCount -gt 0) {
+            foreach ($img in $response.Images) {
+                Write-Host ("    {0}" -f $img.src) -ForegroundColor DarkCyan
+            }
+        } else {
+            Write-Host "    {}" -ForegroundColor DarkCyan
+        }
+
+        # ── Input Fields ──────────────────────────────────────────────────────
+        $fieldCount = if ($response.InputFields) { $response.InputFields.Count } else { 0 }
+        Write-Host ""
+        Write-Host ("  {0,-26}" -f "InputFields:") -ForegroundColor White
+        if ($fieldCount -gt 0) {
+            foreach ($field in $response.InputFields) {
+                Write-Host ("    {0,-20} {1}" -f $field.name, $field.value) -ForegroundColor DarkCyan
+            }
+        } else {
+            Write-Host "    {}" -ForegroundColor DarkCyan
+        }
+
+        # ── Links ─────────────────────────────────────────────────────────────
+        $linkCount = if ($response.Links) { $response.Links.Count } else { 0 }
+        Write-Host ""
+        Write-Host ("  {0,-26}" -f "Links:") -ForegroundColor White
+        if ($linkCount -gt 0) {
+            foreach ($link in $response.Links) {
+                Write-Host ("    {0}" -f $link.href) -ForegroundColor DarkCyan
+            }
+        } else {
+            Write-Host "    {}" -ForegroundColor DarkCyan
+        }
+
+        # ── Raw Content (first 500 chars preview) ─────────────────────────────
+        $rawPreview = if ($response.RawContent) {
+            $response.RawContent.Substring(0, [math]::Min(500, $response.RawContent.Length))
+        } else { "" }
+        Write-Host ""
+        Write-Host ("  {0,-26}" -f "RawContent:") -ForegroundColor White
+        Write-Host ("    $rawPreview") -ForegroundColor DarkCyan
+
+        # ── Content (body preview, first 500 chars) ───────────────────────────
+        $contentPreview = if ($response.Content) {
+            $response.Content.Substring(0, [math]::Min(500, $response.Content.Length))
+        } else { "" }
+        Write-Host ""
+        Write-Host ("  {0,-26}" -f "Content:") -ForegroundColor White
+        Write-Host ("    $contentPreview") -ForegroundColor DarkCyan
+
+        # ── Sizes & relation links ─────────────────────────────────────────────
         $bodyBytes = if ($response.RawContentLength -gt 0) {
             $response.RawContentLength
         } elseif ($response.Content) {
@@ -555,18 +610,23 @@ function Invoke-HTTPResponse {
         } else { 0 }
 
         Write-Host ""
-        Write-Status "Body size" "$bodyBytes bytes" "White"
+        Write-Status "RawContentLength"  "$bodyBytes bytes"                                  "White"
+        Write-Status "RelationLink"      $(if ($response.RelationLink.Count -gt 0) { ($response.RelationLink.Keys -join ", ") } else { "{}" }) "White"
 
         if ($statusCode -ge 400) {
             Add-Warning "HTTP $statusCode $statusDesc returned by the endpoint."
         }
 
         return [PSCustomObject]@{
-            StatusCode    = $statusCode
-            StatusDesc    = $statusDesc
-            ResponseMs    = $sw.ElapsedMilliseconds
-            Headers       = $response.Headers
-            BodyBytes     = $bodyBytes
+            StatusCode        = $statusCode
+            StatusDescription = $statusDesc
+            ResponseMs        = $sw.ElapsedMilliseconds
+            Headers           = $response.Headers
+            Images            = $response.Images
+            InputFields       = $response.InputFields
+            Links             = $response.Links
+            RawContentLength  = $bodyBytes
+            RelationLink      = $response.RelationLink
         }
     }
     catch [System.Net.WebException] {
@@ -627,7 +687,7 @@ $targetHost = $parsedUri.Host
 if ($parsedUri.Port -ne -1) { $Port = $parsedUri.Port }
 
 Write-Host ""
-Write-Host "  SSL / TLS Connectivity Check  v2.4 by Hashim Hilal" -ForegroundColor Cyan
+Write-Host "  SSL / TLS Connectivity Check  v2.5 by Hashim Hilal" -ForegroundColor Cyan
 Write-Host "  Target : $targetHost : $Port"
 Write-Host "  Run at : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
 
