@@ -138,7 +138,7 @@
 .NOTES
     Author      : Hashim Hilal
     Script Name : sslCheck.ps1
-    Version     : 2.9
+    Version     : 3.0
 
     Intended use
     - Replaces Invoke-WebRequest for HTTPS endpoint health checks
@@ -635,9 +635,10 @@ function Get-SSLCertificateInfo {
                 $elExpiry = ($elCert.NotAfter - (Get-Date)).Days
                 $elColor  = if ($elExpiry -lt 0) { "Red" } elseif ($elExpiry -lt 30) { "Yellow" } else { "DarkCyan" }
                 Write-Host ("${indent}[$($ci+1)] $elLabel") -ForegroundColor White
-                Write-Host ("${indent}    Subject : $($elCert.Subject)") -ForegroundColor $elColor
-                Write-Host ("${indent}    Issuer  : $($elCert.Issuer)") -ForegroundColor DarkGray
-                Write-Host ("${indent}    Expires : $($elCert.NotAfter.ToString('yyyy-MM-dd'))  ($elExpiry days)") -ForegroundColor $elColor
+                Write-Host ("${indent}    Subject    : $($elCert.Subject)") -ForegroundColor $elColor
+                Write-Host ("${indent}    Issuer     : $($elCert.Issuer)") -ForegroundColor DarkGray
+                Write-Host ("${indent}    Thumbprint : $($elCert.Thumbprint.ToLower())") -ForegroundColor DarkCyan
+                Write-Host ("${indent}    Expires    : $($elCert.NotAfter.ToString('yyyy-MM-dd'))  ($elExpiry days)") -ForegroundColor $elColor
             }
         } else {
             Write-Host "    Chain not available" -ForegroundColor DarkGray
@@ -1129,7 +1130,7 @@ catch {
 }
 
 Write-Host ""
-Write-Host "  SSL / TLS Connectivity Check  v2.9 by Hashim Hilal" -ForegroundColor Cyan
+Write-Host "  SSL / TLS Connectivity Check  v3.0 by Hashim Hilal" -ForegroundColor Cyan
 Write-Host "  Target : $targetHost : $Port"
 Write-Host "  Run at : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
 
@@ -1222,9 +1223,11 @@ if ($script:FailLog.Count -eq 0 -and $trusted) {
 
 # ICMP Ping - separate stage, always runs if TCP succeeded
 try {
-    $pingDestIP = if ($dns.ResolvedIPs -and $dns.ResolvedIPs.Count -gt 0) {
-        $dns.ResolvedIPs[0]
-    } else { $targetHost }
+    if ($dns.ResolvedIPs -and $dns.ResolvedIPs.Count -gt 0) {
+        $pingDestIP = $dns.ResolvedIPs[0]
+    } else {
+        $pingDestIP = $targetHost
+    }
     Invoke-ICMPPing -TargetHost $targetHost -TargetIP $pingDestIP
 }
 catch {
