@@ -1,93 +1,158 @@
 <#
 .SYNOPSIS
-    Checks HTTPS / SSL connectivity, TLS versions, and certificate health for a given endpoint.
+    Enterprise HTTPS diagnostic tool - DNS, TCP, TLS, certificate security,
+    real-world trust validation, HTTP response inspection, and ICMP ping in
+    a single staged run. A comprehensive replacement for Invoke-WebRequest
+    and Test-NetConnection on port 443.
 
 .DESCRIPTION
-    sslCheck.ps1 performs a layered SSL/TLS inspection of an HTTPS endpoint:
+    sslCheck.ps1 is a layered HTTPS connectivity and security inspection tool
+    built for enterprise environments - both private and public endpoints,
+    TLS-intercepted networks (e.g. Zscaler), and internal PKI scenarios.
 
-        [Stage 1] DNS Resolution
-            Resolves the hostname to IP addresses.
-            Exits early if resolution fails - handles both private and public endpoints.
+    Each stage gates the next. If DNS fails, TCP is not attempted. If TCP
+    fails, TLS is not attempted. All failures and warnings are caught
+    gracefully and surfaced without crashing the script.
 
-        [Stage 2] TCP Reachability
-            Attempts a TCP connection on the target port.
-            Runs a fast Traceroute on failure to identify where traffic is dropped.
+    Stages
+    ------
+    [Stage 1] DNS Resolution
+        Resolves the hostname using an async lookup with a 3-second timeout.
+        Displays all resolved IPs. Handles split-horizon DNS and private zones.
+        Raw IP addresses bypass this stage.
 
-        [Stage 3a] TLS Handshake & Certificate Inspection
-            Connects with certificate bypass to inspect the cert regardless of trust.
-            Reports TLS version, cipher, certificate details, SANs grouped by domain.
-            Includes Certificate Transparency log verification for public certs.
-            Checks signature algorithm (flags MD5/SHA-1), key size (flags RSA <2048-bit),
-            and displays the full certificate chain from leaf to root.
+    [Stage 2] TCP Reachability
+        Explicit TCP connect with configurable timeout and retry support.
+        On failure, automatically runs a fast Traceroute (capped hops, no
+        reverse DNS lookups) to identify where in the network path traffic
+        is being dropped. Suppressed with -SkipTraceroute.
 
-        [Stage 3b] Real-World Trust Validation
-            Connects WITHOUT bypass using the Windows certificate store - exactly
-            as Invoke-WebRequest, browsers, and applications do.
-            A failure here means real clients will reject the endpoint.
+    [Stage 3a] TLS Handshake & Certificate Inspection
+        Connects with certificate bypass to inspect the cert regardless of
+        whether it is trusted on the current machine. Reports:
+          - Negotiated TLS version and cipher (flags weak ciphers in red)
+          - SNI sent and HTTP version negotiated
+          - Certificate subject, issuer, thumbprint, serial number
+          - Signature algorithm (flags MD5 and SHA-1 as insecure)
+          - Public key type and size (flags RSA under 2048-bit)
+          - Expiry with days remaining and colour-coded urgency
+          - Certificate type: Self-Signed / Publicly Trusted CA / Private CA
+          - Full certificate chain from leaf to root with per-element expiry
+          - Certificate Transparency SCT check for publicly trusted certs
+          - SANs grouped by root domain with entry counts
 
-        [Stage 3c] HTTP Response
-            Sends a real HTTP GET using Invoke-WebRequest and reports status code,
-            response time, and all response headers. Only runs if Stage 3b passes.
-            4xx/5xx responses are shown in full and queued as warnings.
+    [Stage 3b] Real-World Trust Validation
+        Makes a second TLS connection WITHOUT certificate bypass, using the
+        Windows certificate store exactly as Invoke-WebRequest, browsers, and
+        applications do. A failure here is why Invoke-WebRequest fails while
+        Stage 3a passes. Reports the exact failure reason and remediation step.
 
-        [Stage 4 - Optional] Legacy TLS Audit
-            Safe isolated probes covering SSL 2.0, SSL 3.0, TLS 1.0 through 1.3.
-            SSLv2/SSLv3 flagged as critical. TLS 1.0/1.1 flagged as deprecated.
-            Enabled with -AuditLegacyTls. Does not affect the primary connection.
+    [Stage 3c] HTTP Response
+        Sends a real HTTP GET via Invoke-WebRequest with redirect following
+        disabled (-MaximumRedirection 0) to prevent browser popups on SSO/SAML
+        protected endpoints. Reports status code, response time, all headers,
+        images, input fields, links, raw content preview, and body size.
+        Detects and labels SAML/OAuth redirect responses. Only runs if Stage
+        3b passes.
 
-        [Connection Summary]
-            Shown when all stages pass. Reports source IP, source hostname,
-            destination IP, and destination hostname for the completed connection.
+    [Stage 4 - Optional] Legacy TLS Audit (-AuditLegacyTls)
+        Non-destructive isolated probes for SSL 2.0, SSL 3.0, TLS 1.0, 1.1,
+        1.2, and 1.3. Does not affect the primary connection or result.
+        SSL 2.0 and 3.0 flagged as critical (POODLE/DROWN).
+        TLS 1.0 and 1.1 flagged as deprecated.
 
-        [Warnings]
-            All advisory items and hard failures are collected during execution
-            and printed together at the end in one place.
+    [Connection Summary]
+        Shown when all stages pass with no failures. Reports source IP and
+        hostname (resolved via reverse DNS) and destination IP and hostname.
 
-    No HTTP content is downloaded. This is a read-only security and connectivity check.
-    All stages include graceful error handling - unexpected failures are caught,
-    reported cleanly, and logged to the Warnings section without crashing the script.
+    [ICMP Ping]
+        Sends 4 ICMP echo requests and displays full ping output matching
+        native ping.exe format - reply lines, packet statistics, and round
+        trip times. Handles IPv6 gracefully. Fails silently if ICMP is blocked
+        by firewall or host policy with a clear informational note.
+
+    [Warnings]
+        All advisory items collected silently during every stage and printed
+        together at the end. Suppressed entirely if a hard failure occurred -
+        failures are shown inline at the stage where they happen.
+
+    Read-only. No HTTP content is stored. No changes are made to the system.
 
 .PARAMETER Uri
-    The HTTPS endpoint to test. https:// prefix is optional.
+    The HTTPS endpoint to test. The https:// prefix is optional.
+    Accepts FQDN, hostname, or raw IP address. Port can be embedded
+    in the URI (e.g. https://example.com:8443) or passed via -Port.
 
 .PARAMETER Port
     TCP port to connect to. Default: 443.
+    Overridden by a port embedded in the URI.
 
 .PARAMETER TimeoutMs
-    Connection timeout in milliseconds. Default: 5000.
+    Connection timeout in milliseconds for TCP and TLS operations.
+    Default: 5000 (5 seconds). Increase for slow private endpoints.
 
 .PARAMETER TraceRouteHops
-    Maximum hops for Traceroute when TCP fails. Default: 15.
+    Maximum number of hops for the automatic Traceroute on TCP failure.
+    Default: 15. Lower values complete faster; raise for long network paths.
 
 .PARAMETER AuditLegacyTls
-    Probe which TLS versions (1.0-1.3) the endpoint accepts. Non-destructive.
+    Enables Stage 4 TLS version audit. Probes SSL 2.0, SSL 3.0, and TLS
+    1.0 through 1.3 using isolated non-destructive connections.
 
 .PARAMETER SkipTraceroute
-    Suppress the automatic Traceroute on TCP failure.
+    Suppresses the automatic Traceroute when TCP connection fails.
+    Use in environments where ICMP is blocked or the wait is unacceptable.
 
 .PARAMETER RetryCount
-    Number of retry attempts for TCP connections. Default: 0.
+    Number of additional TCP connection attempts after the first failure.
+    Default: 0 (no retries). Use for flaky or rate-limited endpoints.
 
 .PARAMETER RetryDelayMs
-    Delay between retry attempts in milliseconds. Default: 1000.
+    Milliseconds to wait between TCP retry attempts. Default: 1000.
 
 .EXAMPLE
+    Basic check:
     .\sslCheck.ps1 -Uri https://example.com
-    .\sslCheck.ps1 -Uri https://example.com -AuditLegacyTls
+
+.EXAMPLE
+    Internal private endpoint with longer timeout:
     .\sslCheck.ps1 -Uri https://internal-api.corp.local -TimeoutMs 10000
-    .\sslCheck.ps1 -Uri https://example.com -Port 8443 -SkipTraceroute
+
+.EXAMPLE
+    HTTPS on non-standard port:
+    .\sslCheck.ps1 -Uri https://example.com -Port 8443
+    .\sslCheck.ps1 -Uri https://example.com:8443
+
+.EXAMPLE
+    Full audit including legacy TLS probe:
+    .\sslCheck.ps1 -Uri https://example.com -AuditLegacyTls
+
+.EXAMPLE
+    Flaky endpoint with retries:
     .\sslCheck.ps1 -Uri https://flaky.example.com -RetryCount 2 -RetryDelayMs 2000
+
+.EXAMPLE
+    Skip traceroute on environments where ICMP is blocked:
+    .\sslCheck.ps1 -Uri https://example.com -SkipTraceroute
 
 .NOTES
     Author      : Hashim Hilal
     Script Name : sslCheck.ps1
     Version     : 2.9
 
-    - Stage 3a uses certificate bypass for inspection purposes only.
-    - Stage 3b uses real Windows trust validation - matches Invoke-WebRequest behaviour.
-    - In TLS-intercepted networks (e.g. Zscaler), results reflect the client-to-proxy leg.
-    - Traceroute uses Test-NetConnection -TraceRoute (ICMP, Windows 8+ / PS 4.0+).
-    - TLS 1.3 probing requires Windows 10 1903+ or Windows Server 2022.
+    Intended use
+    - Replaces Invoke-WebRequest for HTTPS endpoint health checks
+    - Replaces Test-NetConnection -Port 443 with full TLS and cert detail
+    - Enterprise PKI and private CA environments fully supported
+    - Works behind TLS inspection proxies (Zscaler etc.) - results reflect
+      the client-to-proxy leg, which is the correct trust boundary to test
+
+    Requirements
+    - Windows PowerShell 5.1 or PowerShell 7+
+    - Windows 8 / Server 2012 or later
+    - TLS 1.3 probing requires Windows 10 1903+ or Windows Server 2022
+    - Traceroute requires Test-NetConnection (PS 4.0+ / Windows 8+)
+    - No external modules required
 #>
 
 param (
