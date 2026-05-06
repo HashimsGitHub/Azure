@@ -110,6 +110,27 @@
 .PARAMETER RetryDelayMs
     Milliseconds to wait between TCP retry attempts. Default: 1000.
 
+.PARAMETER ExportCerts
+    Export all certificates in the chain to disk as .cer (DER), .pem (Base64),
+    a full chain .pem, and a PKCS#7 .p7b bundle.
+    Files are saved to a folder named after the hostname and timestamp.
+
+.PARAMETER SaveReport
+    Save the full run output as a colour-coded HTML report.
+    Opens in any browser and can be printed to PDF via Ctrl+P.
+    No external modules or installs required.
+
+.PARAMETER ReportPath
+    Directory to save the HTML report file.
+    Default: Documents\sslCheck-Output under the current user profile.
+    The directory is created if it does not exist.
+
+.PARAMETER ExportPath
+    Directory to save exported certificate files.
+    Default: Documents\sslCheck-Output under the current user profile.
+    A timestamped subfolder is created per run. The directory is created if it does not exist.
+    Override with a full path e.g. -ExportPath "C:\Certs" (requires Administrator on Windows).
+
 .EXAMPLE
     Basic check:
     .\sslCheck.ps1 -Uri https://example.com
@@ -138,7 +159,7 @@
 .NOTES
     Author      : Hashim Hilal
     Script Name : sslCheck.ps1
-    Version     : 3.0
+    Version     : 3.2
 
     Intended use
     - Replaces Invoke-WebRequest for HTTPS endpoint health checks
@@ -146,6 +167,12 @@
     - Enterprise PKI and private CA environments fully supported
     - Works behind TLS inspection proxies (Zscaler etc.) - results reflect
       the client-to-proxy leg, which is the correct trust boundary to test
+
+    Certificate Export (-ExportCerts)
+    Exports all chain certificates to a timestamped folder as .cer (DER),
+    .pem (Base64), chain_full.pem (concatenated), and chain_full.p7b (PKCS#7).
+    Private keys are never available from a TLS handshake and are not exported.
+    Use -ExportPath to specify the output directory.
 
     Requirements
     - Windows PowerShell 5.1 or PowerShell 7+
@@ -166,7 +193,11 @@ param (
     [int]$RetryDelayMs   = 1000,
 
     [switch]$AuditLegacyTls,
-    [switch]$SkipTraceroute
+    [switch]$SkipTraceroute,
+    [switch]$ExportCerts,
+    [string]$ExportPath  = (Join-Path ([System.Environment]::GetFolderPath("MyDocuments")) "sslCheck-Output"),
+    [switch]$SaveReport,
+    [string]$ReportPath  = (Join-Path ([System.Environment]::GetFolderPath("MyDocuments")) "sslCheck-Output")
 )
 
 #region -- Initialization --------------------------------------------------------
@@ -185,17 +216,39 @@ function Write-Section {
     Write-Host $line      -ForegroundColor DarkGray
     Write-Host "  $Title" -ForegroundColor Cyan
     Write-Host $line      -ForegroundColor DarkGray
+    Add-ReportLine ""
+    Add-ReportLine $line "DarkGray" "section-line"
+    Add-ReportLine "  $Title" "Cyan" "section-title"
+    Add-ReportLine $line "DarkGray" "section-line"
 }
 
 function Write-Status {
     param([string]$Label, [string]$Value, [string]$Color = "White")
-    Write-Host ("  {0,-26} {1}" -f "${Label}:", $Value) -ForegroundColor $Color
+    $line = ("  {0,-26} {1}" -f "${Label}:", $Value)
+    Write-Host $line -ForegroundColor $Color
+    Add-ReportLine $line $Color "status"
 }
 
-function Write-Pass { param([string]$msg) Write-Host "  [PASS] $msg" -ForegroundColor Green }
-function Write-Fail { param([string]$msg) Write-Host "  [FAIL] $msg" -ForegroundColor Red   }
-function Write-Info { param([string]$msg) Write-Host "  [INFO] $msg" -ForegroundColor Gray  }
-function Write-Note { param([string]$msg) Write-Host "  [NOTE] $msg" -ForegroundColor Cyan  }
+function Write-Pass {
+    param([string]$msg)
+    Write-Host "  [PASS] $msg" -ForegroundColor Green
+    Add-ReportLine "  [PASS] $msg" "Green" "pass"
+}
+function Write-Fail {
+    param([string]$msg)
+    Write-Host "  [FAIL] $msg" -ForegroundColor Red
+    Add-ReportLine "  [FAIL] $msg" "Red" "fail"
+}
+function Write-Info {
+    param([string]$msg)
+    Write-Host "  [INFO] $msg" -ForegroundColor Gray
+    Add-ReportLine "  [INFO] $msg" "Gray" "info"
+}
+function Write-Note {
+    param([string]$msg)
+    Write-Host "  [NOTE] $msg" -ForegroundColor Cyan
+    Add-ReportLine "  [NOTE] $msg" "Cyan" "note"
+}
 
 function Write-GracefulExit {
     param([string]$Stage, [string]$Reason)
@@ -204,6 +257,16 @@ function Write-GracefulExit {
     Write-Info "Reason : $Reason"
     Write-Info "The script has exited cleanly. No further stages were run."
     Write-Host ""
+}
+
+# HTML Report collector - accumulates all output lines when -SaveReport is used
+$script:ReportLines = [System.Collections.Generic.List[object]]::new()
+
+function Add-ReportLine {
+    param([string]$Text, [string]$Color = "White", [string]$Type = "text")
+    if ($script:SaveReportEnabled) {
+        $script:ReportLines.Add([PSCustomObject]@{ Text=$Text; Color=$Color; Type=$Type })
+    }
 }
 
 # Cipher suite name mapping for better readability
@@ -1112,6 +1175,303 @@ function Invoke-ICMPPing {
 
 #endregion
 
+#region -- Certificate Export ----------------------------------------------------
+
+function Export-CertificateChain {
+    param(
+        [string]$TargetHost,
+        [System.Security.Cryptography.X509Certificates.X509Chain]$Chain,
+        [string]$ExportPath
+    )
+
+    Write-Section "Certificate Export"
+
+    try {
+        # Build output folder: hostname_YYYYMMDD_HHmmss
+        $timestamp  = Get-Date -Format "yyyyMMdd_HHmmss"
+        $safeName   = $TargetHost -replace '[^a-zA-Z0-9\.\-]', '_'
+        $folderName = "${safeName}_${timestamp}"
+        $outputDir  = Join-Path $ExportPath $folderName
+
+        if (-not (Test-Path $outputDir)) {
+            New-Item -ItemType Directory -Path $outputDir -Force | Out-Null
+        }
+
+        Write-Info "Exporting to: $outputDir"
+        Write-Host ""
+
+        $chainPemContent = ""
+        $p7bCerts        = [System.Security.Cryptography.X509Certificates.X509Certificate2Collection]::new()
+
+        for ($ci = 0; $ci -lt $Chain.ChainElements.Count; $ci++) {
+            $elCert = $Chain.ChainElements[$ci].Certificate
+            $role   = if ($ci -eq 0) { "leaf" }
+                      elseif ($ci -eq $Chain.ChainElements.Count - 1) { "root" }
+                      else { "intermediate_$ci" }
+
+            # DER (.cer)
+            $cerPath = Join-Path $outputDir "$role.cer"
+            $derBytes = $elCert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert)
+            [System.IO.File]::WriteAllBytes($cerPath, $derBytes)
+
+            # PEM (.pem) - Base64 wrapped at 64 chars
+            $pemPath    = Join-Path $outputDir "$role.pem"
+            $b64        = [System.Convert]::ToBase64String($derBytes)
+            $b64Wrapped = ($b64 -split '(.{64})' | Where-Object { $_ }) -join "`n"
+            $pemContent = "-----BEGIN CERTIFICATE-----`n$b64Wrapped`n-----END CERTIFICATE-----`n"
+            [System.IO.File]::WriteAllText($pemPath, $pemContent)
+
+            # Accumulate for chain files
+            $chainPemContent += $pemContent
+            $p7bCerts.Add($elCert) | Out-Null
+
+            $label = if ($ci -eq 0) { "Leaf" } elseif ($ci -eq $Chain.ChainElements.Count - 1) { "Root CA" } else { "Intermediate CA $ci" }
+            Write-Pass "$label exported"
+            Write-Status "  DER (.cer)" (Split-Path $cerPath -Leaf) "White"
+            Write-Status "  PEM (.pem)" (Split-Path $pemPath -Leaf) "White"
+            Write-Host ""
+        }
+
+        # Full chain PEM (leaf to root concatenated)
+        $chainPemPath = Join-Path $outputDir "chain_full.pem"
+        [System.IO.File]::WriteAllText($chainPemPath, $chainPemContent)
+        Write-Pass "Full chain PEM exported"
+        Write-Status "  File" "chain_full.pem" "White"
+        Write-Host ""
+
+        # PKCS#7 bundle (.p7b)
+        try {
+            $p7bPath  = Join-Path $outputDir "chain_full.p7b"
+            $p7bBytes = $p7bCerts.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Pkcs7)
+            [System.IO.File]::WriteAllBytes($p7bPath, $p7bBytes)
+            Write-Pass "PKCS#7 bundle exported"
+            Write-Status "  File" "chain_full.p7b" "White"
+            Write-Host ""
+        }
+        catch {
+            Write-Info "PKCS#7 export skipped: $($_.Exception.Message)"
+        }
+
+        Write-Host ""
+        Write-Host ("  {0,-26} {1}" -f "Output folder:", $outputDir) -ForegroundColor Green
+        Write-Host ""
+        Write-Info "Files can be imported into certlm.msc or used with OpenSSL"
+        Write-Info "Private keys are never exported - only public certificates are available from the TLS handshake"
+    }
+    catch {
+        Write-Fail "Certificate export failed: $($_.Exception.Message)"
+        Add-Failure "Certificate export failed: $($_.Exception.Message)"
+    }
+}
+
+#endregion
+
+#region -- HTML Report ----------------------------------------------------------
+
+function Save-HTMLReport {
+    param(
+        [string]$TargetHost,
+        [string]$ReportPath,
+        [string]$RunAt,
+        [System.Collections.Generic.List[object]]$Lines,
+        [double]$RuntimeSeconds
+    )
+
+    # Color map: PowerShell color names -> CSS colors
+    $colorMap = @{
+        "Green"    = "#4ec94e"
+        "Red"      = "#f05555"
+        "Yellow"   = "#f0c040"
+        "Cyan"     = "#40d0d0"
+        "White"    = "#e8e8e8"
+        "Gray"     = "#909090"
+        "DarkGray" = "#555555"
+        "DarkCyan" = "#2a9d9d"
+        "default"  = "#e8e8e8"
+    }
+
+    function Get-CSSColor([string]$name) {
+        if ($colorMap.ContainsKey($name)) { return $colorMap[$name] }
+        return $colorMap["default"]
+    }
+
+    function Escape-Html([string]$text) {
+        $text -replace '&','&amp;' -replace '<','&lt;' -replace '>','&gt;' -replace '"','&quot;'
+    }
+
+    # Build HTML body lines
+    $bodyLines = [System.Text.StringBuilder]::new()
+
+    foreach ($line in $Lines) {
+        $escaped = Escape-Html $line.Text
+        $css     = Get-CSSColor $line.Color
+
+        switch ($line.Type) {
+            "section-line"  {
+                [void]$bodyLines.AppendLine("<div class='section-line'></div>")
+            }
+            "section-title" {
+                $title = $escaped.Trim()
+                [void]$bodyLines.AppendLine("<div class='section-title'>$title</div>")
+            }
+            "pass"  { [void]$bodyLines.AppendLine("<div class='line pass'>$escaped</div>") }
+            "fail"  { [void]$bodyLines.AppendLine("<div class='line fail'>$escaped</div>") }
+            "info"  { [void]$bodyLines.AppendLine("<div class='line info'>$escaped</div>") }
+            "note"  { [void]$bodyLines.AppendLine("<div class='line note'>$escaped</div>") }
+            "header"{ [void]$bodyLines.AppendLine("<div class='line header' style='color:$css'>$escaped</div>") }
+            default {
+                if ($escaped.Trim() -eq "") {
+                    [void]$bodyLines.AppendLine("<div class='spacer'></div>")
+                } else {
+                    [void]$bodyLines.AppendLine("<div class='line' style='color:$css'>$escaped</div>")
+                }
+            }
+        }
+    }
+
+    $html = @"
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>sslCheck Report - $TargetHost</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #1a1a2e;
+    color: #e8e8e8;
+    font-family: 'Consolas', 'Courier New', monospace;
+    font-size: 13px;
+    line-height: 1.6;
+    padding: 0;
+  }
+  .page-header {
+    background: linear-gradient(135deg, #0f3460 0%, #16213e 100%);
+    border-bottom: 2px solid #40d0d0;
+    padding: 24px 32px 20px;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+  }
+  .page-header h1 {
+    color: #40d0d0;
+    font-size: 18px;
+    font-weight: bold;
+    letter-spacing: 1px;
+  }
+  .page-header .meta {
+    color: #909090;
+    font-size: 12px;
+    margin-top: 4px;
+  }
+  .print-btn {
+    float: right;
+    background: #40d0d0;
+    color: #1a1a2e;
+    border: none;
+    padding: 8px 18px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 12px;
+    font-weight: bold;
+    margin-top: -4px;
+  }
+  .print-btn:hover { background: #5ae0e0; }
+  .container {
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 24px 32px 48px;
+  }
+  .output {
+    background: #0d1117;
+    border: 1px solid #30363d;
+    border-radius: 8px;
+    padding: 20px 24px;
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+  .line { margin: 1px 0; white-space: pre; }
+  .spacer { height: 6px; }
+  .section-line {
+    border-top: 1px solid #30363d;
+    margin: 14px 0 2px;
+  }
+  .section-title {
+    color: #40d0d0;
+    font-weight: bold;
+    font-size: 13px;
+    margin: 2px 0 6px;
+    padding-left: 2px;
+  }
+  .pass  { color: #4ec94e; }
+  .fail  { color: #f05555; font-weight: bold; }
+  .info  { color: #909090; }
+  .note  { color: #40d0d0; }
+  .header{ font-weight: bold; }
+  .footer {
+    text-align: center;
+    color: #555;
+    font-size: 11px;
+    margin-top: 24px;
+    padding-bottom: 16px;
+  }
+  @media print {
+    body { background: #fff; color: #000; }
+    .page-header { background: #fff; border-bottom: 2px solid #000; position: static; }
+    .page-header h1 { color: #000; }
+    .print-btn { display: none; }
+    .output { background: #fff; border: 1px solid #ccc; color: #000; }
+    .pass  { color: #006600; }
+    .fail  { color: #cc0000; }
+    .info  { color: #666; }
+    .note  { color: #006080; }
+    .section-title { color: #004080; }
+    .line  { color: #000; }
+  }
+</style>
+</head>
+<body>
+<div class="page-header">
+  <button class="print-btn" onclick="window.print()">Print / Save PDF</button>
+  <h1>SSL / TLS Connectivity Check - Report</h1>
+  <div class="meta">Target: <strong>$TargetHost</strong> &nbsp;|&nbsp; Run at: $RunAt &nbsp;|&nbsp; Total runtime: $([math]::Round($RuntimeSeconds,2))s &nbsp;|&nbsp; Generated by sslCheck.ps1 v3.2</div>
+</div>
+<div class="container">
+  <div class="output">
+$($bodyLines.ToString())  </div>
+  <div class="footer">Generated by sslCheck.ps1 v3.2 by Hashim Hilal &nbsp;|&nbsp; Read-only inspection - no changes made to any system</div>
+</div>
+</body>
+</html>
+"@
+
+    try {
+        if (-not (Test-Path $ReportPath)) {
+            New-Item -ItemType Directory -Path $ReportPath -Force | Out-Null
+        }
+        $safeName  = $TargetHost -replace '[^a-zA-Z0-9\.\-]', '_'
+        $timestamp = $RunAt -replace '[: ]', '-' -replace '--', '-'
+        $fileName  = "sslCheck_${safeName}_${timestamp}.html"
+        $filePath  = Join-Path $ReportPath $fileName
+        [System.IO.File]::WriteAllText($filePath, $html, [System.Text.Encoding]::UTF8)
+
+        Write-Host ""
+        Write-Host "  Report saved:" -ForegroundColor Cyan
+        Write-Host "  $filePath" -ForegroundColor Green
+        Write-Host "  Open in any browser. Use Print / Save PDF button to export as PDF." -ForegroundColor Gray
+        Write-Host ""
+    }
+    catch {
+        Write-Host ""
+        Write-Host "  [FAIL] Could not save report: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host ""
+    }
+}
+
+#endregion
+
 #region -- Entry Point -----------------------------------------------------------
 
 if ($Uri -notmatch '^https?://') { $Uri = "https://$Uri" }
@@ -1129,10 +1489,17 @@ catch {
     exit 1
 }
 
+# Enable report collector if -SaveReport was requested
+$script:SaveReportEnabled = $SaveReport.IsPresent
+
 Write-Host ""
-Write-Host "  SSL / TLS Connectivity Check  v3.0 by Hashim Hilal" -ForegroundColor Cyan
+Write-Host "  SSL / TLS Connectivity Check  v3.2 by Hashim Hilal" -ForegroundColor Cyan
 Write-Host "  Target : $targetHost : $Port"
 Write-Host "  Run at : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+Add-ReportLine ""
+Add-ReportLine "  SSL / TLS Connectivity Check  v3.2 by Hashim Hilal" "Cyan" "header"
+Add-ReportLine "  Target : $targetHost : $Port" "White" "header"
+Add-ReportLine "  Run at : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" "White" "header"
 
 # Stage 1 - DNS
 $dns = $null
@@ -1221,6 +1588,40 @@ if ($script:FailLog.Count -eq 0 -and $trusted) {
     }
 }
 
+# Certificate Export - only if -ExportCerts switch was provided
+if ($ExportCerts) {
+    if ($script:FailLog.Count -eq 0 -or $script:FailLog -notmatch 'TLS handshake') {
+        try {
+            # Re-build the chain from the cert captured in Stage 3a
+            # We need a fresh TLS connection to get the cert for export
+            $expTcp = $null; $expSsl = $null
+            try {
+                $expTcp = New-Object System.Net.Sockets.TcpClient
+                $expTcp.ConnectAsync($targetHost, $Port).Wait($TimeoutMs) | Out-Null
+                $expSsl = New-Object System.Net.Security.SslStream($expTcp.GetStream(), $false, { $true })
+                $expSsl.AuthenticateAsClient($targetHost)
+                $expCert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 $expSsl.RemoteCertificate
+                $expChain = New-Object System.Security.Cryptography.X509Certificates.X509Chain
+                $expChain.ChainPolicy.RevocationMode    = "NoCheck"
+                $expChain.ChainPolicy.VerificationFlags = "IgnoreWrongUsage"
+                [void]$expChain.Build($expCert)
+                Export-CertificateChain -TargetHost $targetHost -Chain $expChain -ExportPath $ExportPath
+            }
+            finally {
+                if ($expSsl) { try { $expSsl.Dispose() } catch {} }
+                if ($expTcp) { try { $expTcp.Dispose() } catch {} }
+            }
+        }
+        catch {
+            Write-Section "Certificate Export"
+            Write-Fail "Export failed unexpectedly: $($_.Exception.Message)"
+        }
+    } else {
+        Write-Section "Certificate Export"
+        Write-Info "Skipped - TLS handshake failed. Cannot export certificates."
+    }
+}
+
 # ICMP Ping - separate stage, always runs if TCP succeeded
 try {
     if ($dns.ResolvedIPs -and $dns.ResolvedIPs.Count -gt 0) {
@@ -1253,6 +1654,18 @@ if ($script:FailLog.Count -eq 0) {
 $totalRuntime = (Get-Date) - $scriptStartTime
 Write-Host ""
 Write-Host ("  Total runtime: {0:F2} seconds" -f $totalRuntime.TotalSeconds) -ForegroundColor DarkGray
+Add-ReportLine ("  Total runtime: {0:F2} seconds" -f $totalRuntime.TotalSeconds) "DarkGray"
 Write-Host ""
+
+# Save HTML report if requested
+if ($SaveReport) {
+    $runAt = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+    Save-HTMLReport `
+        -TargetHost      $targetHost `
+        -ReportPath      $ReportPath `
+        -RunAt           $runAt `
+        -Lines           $script:ReportLines `
+        -RuntimeSeconds  $totalRuntime.TotalSeconds
+}
 
 #endregion
