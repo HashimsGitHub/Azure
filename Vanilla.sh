@@ -136,7 +136,7 @@ echo "  Protecting SSH port: $SSH_PORT"
 if command -v lsof &> /dev/null; then
     ALL_PORTS=$(safe_run lsof -t -i -P -n -sTCP:LISTEN)
     SSH_PID=$(safe_run lsof -t -i :$SSH_PORT)
-    
+
     if [ -n "$ALL_PORTS" ]; then
         for PID in $ALL_PORTS; do
             if [ "$PID" != "$SSH_PID" ]; then
@@ -158,11 +158,11 @@ echo "[5.5/9] Scanning current working directory for projects..."
 # Go back to original directory to scan
 if [ -d "$ORIGINAL_DIR" ] && [ "$ORIGINAL_DIR" != "/" ] && [ "$ORIGINAL_DIR" != "/root" ] && [ "$ORIGINAL_DIR" != "/home" ]; then
     cd "$ORIGINAL_DIR"
-    
+
     # Find all directories in current working directory (excluding hidden, script, and _BACKUP)
     SCRIPT_NAME=$(basename "$0")
     CURRENT_DIRS=$(find . -maxdepth 1 -type d ! -name "." ! -name "$SCRIPT_NAME" ! -name ".*" ! -name "$BACKUP_DIR" 2>/dev/null | sed 's|^\./||' | grep -v '^$')
-    
+
     if [ -n "$CURRENT_DIRS" ]; then
         echo "--------------------------------------------------------"
         echo "Found directories in current working directory:"
@@ -170,10 +170,10 @@ if [ -d "$ORIGINAL_DIR" ] && [ "$ORIGINAL_DIR" != "/" ] && [ "$ORIGINAL_DIR" != 
         echo "--------------------------------------------------------"
         echo "📁 NOTE: '_BACKUP' directory is EXCLUDED from deletion"
         echo ""
-        
+
         echo -n "⚠️  DELETE ALL THESE DIRECTORIES? (y/n): "
         read confirm < /dev/tty
-        
+
         if [[ $confirm == [yY] ]]; then
             echo "$CURRENT_DIRS" | while read -r DIR; do
                 if [ -n "$DIR" ] && [ -d "$DIR" ] && [ "$DIR" != "$BACKUP_DIR" ]; then
@@ -197,7 +197,7 @@ if [ -d "$ORIGINAL_DIR" ] && [ "$ORIGINAL_DIR" != "/" ] && [ "$ORIGINAL_DIR" != 
     else
         echo "  No directories found in current working directory"
     fi
-    
+
     # Change back to safe directory
     cd /root 2>/dev/null || cd /tmp 2>/dev/null || cd /
 else
@@ -235,10 +235,10 @@ if [ -n "$USER_DIRS" ]; then
     echo "--------------------------------------------------------"
     echo "📁 NOTE: '_BACKUP' directory is EXCLUDED from deletion"
     echo ""
-    
+
     echo -n "⚠️  DELETE THESE USER PROJECT DIRECTORIES? (y/n): "
     read confirm < /dev/tty
-    
+
     if [[ $confirm == [yY] ]]; then
         for DIR in $USER_DIRS; do
             DIR_PATH="$USER_HOME/$DIR"
