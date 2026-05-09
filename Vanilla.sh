@@ -337,7 +337,7 @@ cat << "EOF"
 
 EOF
 
-echo ""
+echo "☢️ SYSTEM NUKED ☢️ "
 
 echo "      (User home directory PROTECTED)"
 echo "      (Backup directory '_BACKUP' preserved)"
